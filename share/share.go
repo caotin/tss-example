@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bnb-chain/tss-lib/common"
@@ -16,13 +17,14 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func NewSharing(partyInt int, threshold int, numParties int, newParties int, newThreshold int, conn *amqp.Connection) {
+func NewSharing(partyInt int, threshold int, numParties int, newParties int, newThreshold int, isNewParty bool, conn *amqp.Connection) {
 
 	newPIDs := GenerateTestPartyIDs(newParties)
 	newP2PCtx := tss.NewPeerContext(newPIDs)
 	newPCount := len(newPIDs)
 
 	oldKeys, oldPIDs, err := LoadData(numParties)
+	fmt.Println(oldPIDs)
 	if err != nil {
 		fmt.Printf("err: %v\n", err)
 	}
@@ -33,62 +35,69 @@ func NewSharing(partyInt int, threshold int, numParties int, newParties int, new
 	outCh := make(chan tss.Message, bothCommitteesPax)
 	endCh := make(chan keygen.LocalPartySaveData, bothCommitteesPax)
 
-	var oldP *LocalParty
-	var newP *LocalParty
+	var P *LocalParty
 
-	newParams := tss.NewReSharingParameters(tss.S256(), oldP2PCtx, newP2PCtx, newPIDs[partyInt-1], numParties, threshold, newParties, newThreshold)
-	preParams, _ := keygen.GeneratePreParams(1 * time.Minute)
-	save := keygen.NewLocalPartySaveData(newPCount)
-	save.LocalPreParams = *preParams
-	newP = NewLocalParty(newParams, save, outCh, endCh).(*LocalParty)
-	fmt.Printf("newP.PartyID().Index: %v\n", newP.PartyID().Index)
+	if isNewParty {
+		newParams := tss.NewReSharingParameters(tss.S256(), oldP2PCtx, newP2PCtx, newPIDs[partyInt-1], numParties, threshold, newParties, newThreshold)
+		save := keygen.NewLocalPartySaveData(newPCount)
+		preParams, _ := keygen.GeneratePreParams(1 * time.Minute)
+		save.LocalPreParams = *preParams
+		P = NewLocalParty(newParams, save, outCh, endCh).(*LocalParty)
+	} else {
+		params := tss.NewReSharingParameters(tss.S256(), oldP2PCtx, newP2PCtx, oldPIDs[partyInt-1], numParties, threshold, newParties, newThreshold)
+		P = NewLocalParty(params, oldKeys[partyInt-1], outCh, endCh).(*LocalParty) // discard old key data
+	}
+	fmt.Printf("Party %s %v\n", P.PartyID().Id, isNewParty)
 	ch, err := conn.Channel()
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
+
+	fmt.Printf("From: %s\n", P.PartyID().Id)
+	messages := ReciveMessage(ch, P.PartyID().Id)
 	go func(P *LocalParty) {
 		if err := P.Start(); err != nil {
 			errCh <- err
 		}
-		if partyInt > numParties && numParties < newParties {
-			messages := ReciveMessage(ch, strconv.Itoa(P.PartyID().Index))
-			fmt.Printf("dest: %v\n", P.PartyID().Index)
-			go func() {
-				for ms := range messages {
-					msgBytes := ms.Body
+		for ms := range messages {
+			msgBytes := ms.Body
 
-					msg := msgBytes[:len(msgBytes)-3]
-					fromByte := msgBytes[len(msgBytes)-3 : len(msgBytes)-2]
-					fromIndex, _ := strconv.Atoi(string(fromByte))
-					broatcastByte := msgBytes[len(msgBytes)-2 : len(msgBytes)-1]
-					broatcast, _ := strconv.Atoi(string(broatcastByte))
-					oldBytes := msgBytes[len(msgBytes)-1]
-					old, _ := strconv.Atoi(string(oldBytes))
-
-					isBroatcast := false
-					if broatcast == 1 {
-						isBroatcast = true
-					}
-
-					if old == 1 {
-						oldP.UpdateFromBytes(msg, oldPIDs[fromIndex], isBroatcast)
-					} else {
-						newP.UpdateFromBytes(msg, newPIDs[fromIndex], isBroatcast)
-					}
-				}
-			}()
-		}
-	}(newP)
-	if partyInt <= len(oldPIDs) {
-		params := tss.NewReSharingParameters(tss.S256(), oldP2PCtx, newP2PCtx, oldPIDs[partyInt-1], numParties, threshold, newParties, newThreshold)
-		oldP = NewLocalParty(params, oldKeys[partyInt-1], outCh, endCh).(*LocalParty) // discard old key data
-		go func(P *LocalParty) {
-			if err := P.Start(); err != nil {
-				errCh <- err
+			msg := msgBytes[:len(msgBytes)-4]
+			fromByte := msgBytes[len(msgBytes)-4 : len(msgBytes)-2]
+			fromString := string(fromByte)
+			fmt.Printf("fromString: %v\n", fromString)
+			fromString = strings.Replace(fromString, "a", "", -1)
+			broatcastByte := msgBytes[len(msgBytes)-2 : len(msgBytes)-1]
+			broatcast, _ := strconv.Atoi(string(broatcastByte))
+			oldBytes := msgBytes[len(msgBytes)-1]
+			old, _ := strconv.Atoi(string(oldBytes))
+			if err != nil {
+				fmt.Printf("err %v", err)
 			}
-		}(oldP)
-	}
-	endedOldCommittee := 0
+			fmt.Printf("old: %v\n", old)
+			isBroatcast := false
+			if broatcast == 1 {
+				isBroatcast = true
+			}
+			fmt.Println("fromIndex", fromString)
+			for i := 0; i < len(oldPIDs); i++ {
+				if oldPIDs[i].Id == fromString {
+					P.UpdateFromBytes(msg, oldPIDs[i], isBroatcast)
+					break
+				}
+			}
+			for i := 0; i < len(newPIDs); i++ {
+				if newPIDs[i].Id == fromString {
+					P.UpdateFromBytes(msg, newPIDs[i], isBroatcast)
+					break
+				}
+			}
 
+		}
+	}(P)
+
+	// go func() {
+
+	// }()
 	for {
 		fmt.Printf("ACTIVE GOROUTINES: %d\n", runtime.NumGoroutine())
 
@@ -99,30 +108,43 @@ func NewSharing(partyInt int, threshold int, numParties int, newParties int, new
 
 		case msg := <-outCh:
 			dest := msg.GetTo()
-			messages := ReciveMessage(ch, strconv.Itoa(msg.GetFrom().Index))
-			fmt.Printf("dest: %v\n", dest)
+			messages := ReciveMessage(ch, P.PartyID().Id)
 			go func() {
+
 				for ms := range messages {
 					msgBytes := ms.Body
 
-					msg := msgBytes[:len(msgBytes)-3]
-					fromByte := msgBytes[len(msgBytes)-3 : len(msgBytes)-2]
-					fromIndex, _ := strconv.Atoi(string(fromByte))
+					msg := msgBytes[:len(msgBytes)-4]
+					fromByte := msgBytes[len(msgBytes)-4 : len(msgBytes)-2]
+					fromString := string(fromByte)
+					fmt.Printf("fromString: %v\n", fromString)
+					fromString = strings.Replace(fromString, "a", "", -1)
 					broatcastByte := msgBytes[len(msgBytes)-2 : len(msgBytes)-1]
 					broatcast, _ := strconv.Atoi(string(broatcastByte))
 					oldBytes := msgBytes[len(msgBytes)-1]
 					old, _ := strconv.Atoi(string(oldBytes))
+					if err != nil {
+						fmt.Printf("err %v", err)
+					}
 					fmt.Printf("old: %v\n", old)
 					isBroatcast := false
 					if broatcast == 1 {
 						isBroatcast = true
 					}
-
-					if old == 1 && numParties > fromIndex {
-						oldP.UpdateFromBytes(msg, oldPIDs[fromIndex], isBroatcast)
-					} else {
-						newP.UpdateFromBytes(msg, newPIDs[fromIndex], isBroatcast)
+					fmt.Println("fromIndex", fromString)
+					for i := 0; i < len(oldPIDs); i++ {
+						if oldPIDs[i].Id == fromString {
+							P.UpdateFromBytes(msg, oldPIDs[i], isBroatcast)
+							break
+						}
 					}
+					for i := 0; i < len(newPIDs); i++ {
+						if newPIDs[i].Id == fromString {
+							P.UpdateFromBytes(msg, newPIDs[i], isBroatcast)
+							break
+						}
+					}
+
 				}
 			}()
 			if dest == nil {
@@ -134,13 +156,16 @@ func NewSharing(partyInt int, threshold int, numParties int, newParties int, new
 					// go updater(oldCommittee[destP.Index], msg, errCh)
 					msgBytes, _, _ := msg.WireBytes()
 					oldBytes := []byte("1")
-					from := []byte(strconv.Itoa(msg.GetFrom().Index))
 					broadcast := "0"
 					if msg.IsBroadcast() {
 						broadcast = "1"
 					}
 					broadcastBytes := []byte(broadcast)
-					SendMessage(ch, strconv.Itoa(destP.Index), append((append(append(msgBytes, from...), broadcastBytes...)), oldBytes...))
+					fromBytes := []byte(msg.GetFrom().Id)
+					if len(fromBytes) == 1 {
+						fromBytes = append(fromBytes, []byte("a")...)
+					}
+					SendMessage(ch, destP.Id, append((append(append(msgBytes, fromBytes...), broadcastBytes...)), oldBytes...))
 				}
 			}
 
@@ -149,13 +174,16 @@ func NewSharing(partyInt int, threshold int, numParties int, newParties int, new
 
 					msgBytes, _, _ := msg.WireBytes()
 					oldBytes := []byte("0")
-					from := []byte(strconv.Itoa(msg.GetFrom().Index))
 					broadcast := "0"
 					if msg.IsBroadcast() {
 						broadcast = "1"
 					}
 					broadcastBytes := []byte(broadcast)
-					SendMessage(ch, strconv.Itoa(destP.Index), append((append(append(msgBytes, from...), broadcastBytes...)), oldBytes...))
+					fromBytes := []byte(msg.GetFrom().Id)
+					if len(fromBytes) == 1 {
+						fromBytes = append(fromBytes, []byte("a")...)
+					}
+					SendMessage(ch, destP.Id, append((append(append(msgBytes, fromBytes...), broadcastBytes...)), oldBytes...))
 				}
 			}
 		case save := <-endCh:
@@ -171,8 +199,6 @@ func NewSharing(partyInt int, threshold int, numParties int, newParties int, new
 				}
 				StorageSavedata(&save, fmt.Sprintf("sharing%d.txt", index))
 				return
-			} else {
-				endedOldCommittee++
 			}
 		}
 	}

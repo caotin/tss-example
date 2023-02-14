@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"math/big"
 	"os"
-	"sort"
 	"strconv"
 
 	"github.com/bnb-chain/tss-lib/ecdsa/keygen"
@@ -26,29 +25,32 @@ func main() {
 	data, _ := hex.DecodeString("c114d5dd701a9904226fe3553175f68e0f777a03072dacba8922dd960661eb39")
 	msg.SetBytes([]byte(data))
 
-	if len(os.Args) < 1 {
-		fmt.Println(nil, "Input party number")
+	if len(os.Args) < 2 {
+		fmt.Println(nil, "Input party number and is new party")
 	}
 	arg := os.Args[1]
 	partyInt, _ := strconv.Atoi(arg)
+	arg2 := os.Args[2]
+	isNewParty := arg2 == "true"
 
 	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
-	NewSharing(partyInt, 3, 4, 5, 2, conn)
+	NewSharing(partyInt, 3, 4, 5, 3, isNewParty, conn)
 }
 
 func LoadData(qty int) ([]keygen.LocalPartySaveData, tss.SortedPartyIDs, error) {
 	keys := make([]keygen.LocalPartySaveData, 0, qty)
-	plucked := make(map[int]interface{}, qty)
-	for i := 0; len(plucked) < qty; i = (i + 1) {
-		_, have := plucked[i]
-		if pluck := 0 < 0.5; !have && pluck {
-			plucked[i] = new(struct{})
-		}
-	}
-	for i := range plucked {
+	// plucked := make(map[int]interface{}, qty)
+	// for i := 0; len(plucked) < qty; i = (i + 1) {
+	// 	_, have := plucked[i]
+	// 	if pluck := 0 < 0.5; !have && pluck {
+	// 		plucked[i] = new(struct{})
+	// 	}
+	// }
+	partyIDs := make(tss.UnSortedPartyIDs, qty)
+	for i := 0; i < qty; i++ {
 		fixtureFilePath := fmt.Sprintf("keygen%d", i)
 		bz, err := ioutil.ReadFile(fixtureFilePath)
 		if err != nil {
@@ -62,17 +64,18 @@ func LoadData(qty int) ([]keygen.LocalPartySaveData, tss.SortedPartyIDs, error) 
 				"could not unmarshal fixture data for party %d located at: %s",
 				i, fixtureFilePath)
 		}
+		pMoniker := fmt.Sprintf("%d", i+1)
+		partyIDs[i] = tss.NewPartyID(pMoniker, pMoniker, key.ShareID)
 		keys = append(keys, key)
 	}
-	partyIDs := make(tss.UnSortedPartyIDs, len(keys))
-	j := 0
-	for i := range plucked {
-		key := keys[j]
-		pMoniker := fmt.Sprintf("%d", i+1)
-		partyIDs[j] = tss.NewPartyID(pMoniker, pMoniker, key.ShareID)
-		j++
-	}
+	// j := 0
+	// for i := range plucked {
+	// 	key := keys[j]
+	// 	pMoniker := fmt.Sprintf("%d", i+1)
+	// 	partyIDs[j] = tss.NewPartyID(pMoniker, pMoniker, key.ShareID)
+	// 	j++
+	// }
 	sortedPIDs := tss.SortPartyIDs(partyIDs)
-	sort.Slice(keys, func(i, j int) bool { return keys[i].ShareID.Cmp(keys[j].ShareID) == -1 })
+	// sort.Slice(keys, func(i, j int) bool { return keys[i].ShareID.Cmp(keys[j].ShareID) == -1 })
 	return keys, sortedPIDs, nil
 }
